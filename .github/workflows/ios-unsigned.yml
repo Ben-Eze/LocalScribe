@@ -1,0 +1,47 @@
+# Builds an unsigned .ipa on a GitHub-hosted Mac. Sign and install it from Windows with Sideloadly.
+name: iOS unsigned build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      # llama.rn's postinstall fetches its prebuilt rnllama.xcframework; run it explicitly
+      # in case npm skipped lifecycle scripts. It's a no-op if already downloaded.
+      - run: node node_modules/llama.rn/install/download-native-artifacts.js
+
+      - run: npx expo prebuild --platform ios --clean
+
+      - name: Build (no code signing)
+        run: |
+          xcodebuild \
+            -workspace ios/LocalScribe.xcworkspace \
+            -scheme LocalScribe \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+
+      - name: Package .ipa
+        run: |
+          mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/LocalScribe.app Payload/
+          zip -qr LocalScribe-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LocalScribe-unsigned-ipa
+          path: LocalScribe-unsigned.ipa

@@ -1,20 +1,21 @@
+import { useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View } from 'react-native';
+
+import ChatScreen from './src/ChatScreen';
+import DownloadScreen from './src/DownloadScreen';
+import { isModelDownloaded } from './src/model';
 
 export default function App() {
+  const [hasModel, setHasModel] = useState(isModelDownloaded);
+
   return (
-    <View style={styles.container}>
-      <Text>Open up App.tsx to start working on your app!</Text>
+    <>
+      {hasModel ? (
+        <ChatScreen onModelDeleted={() => setHasModel(false)} />
+      ) : (
+        <DownloadScreen onDone={() => setHasModel(true)} />
+      )}
       <StatusBar style="auto" />
-    </View>
+    </>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-});
