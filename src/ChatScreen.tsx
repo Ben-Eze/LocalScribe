@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Button, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import { initLlama, type LlamaContext } from 'llama.rn';
-
+import { initLlama, type LlamaContext } from './llama';
 import { deleteModel, modelFile } from './model';
 
 export default function ChatScreen({ onModelDeleted }: { onModelDeleted: () => void }) {
