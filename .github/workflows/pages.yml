@@ -3,7 +3,7 @@ name: Deploy webapp to Pages
 
 on:
   push:
-    branches: [main]
+    branches: [master]
     paths: ['webapp/**']
   workflow_dispatch:
 
