@@ -6,17 +6,19 @@
 // Every action is recorded in the log with what actually happened, so the agent can see its own effects.
 
 // Each name must be one Qwen3 token right after "[" (see the token check on notes.html); "new" fails because "[new" is a single token.
-export const NOTES_OPTION_NAMES = ['create', 'up', 'down', 'add', 'edit', 'del', 'bullet', 'rename', 'home', 'done', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
+// "say"/"speak"/"tell" also merge with "[", hence "reply".
+export const NOTES_OPTION_NAMES = ['create', 'up', 'down', 'add', 'edit', 'del', 'bullet', 'rename', 'home', 'reply', 'done', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
 
 const STORAGE_KEY = 'localscribe-notes';
 const LOG_SHOWN = 20;     // entries included in the observation
 const LOG_KEPT = 200;     // entries kept in storage
 const MAX_STEPS = 8;      // actions per turn before only [done] is offered
-const MAX_TOKENS = { add: 40, edit: 40, rename: 8 };
+const MAX_TOKENS = { add: 40, edit: 40, rename: 8, reply: 30 };
 
 const quote = (s) => JSON.stringify(s);
 
-export function createNotesEnv() {
+// onReply(text) is called whenever the agent says something out loud; the page decides how to voice it.
+export function createNotesEnv({ onReply = () => {} } = {}) {
   let state = { files: [], open: null, log: [] };
   try { Object.assign(state, JSON.parse(localStorage.getItem(STORAGE_KEY)) ?? {}); } catch {}
   let writing = null; // { kind: 'add' | 'edit' | 'rename' } while waiting for text
@@ -31,8 +33,7 @@ export function createNotesEnv() {
   const lineLabel = (line) => (line.bullet ? '• ' : '') + line.text;
 
   function location() {
-    if (!file()) return 'home';
-    return `notes/${file().name}` + (writing ? '/write' : '');
+    return (file() ? `notes/${file().name}` : 'home') + (writing ? '/write' : '');
   }
 
   function logSection() {
@@ -42,12 +43,14 @@ export function createNotesEnv() {
 
   function options() {
     if (steps >= MAX_STEPS) return [{ name: 'done', description: 'step limit reached; end this turn' }];
+    const reply = { name: 'reply', description: 'say something out loud to the user' };
     const done = { name: 'done', description: 'finished; wait for the user to speak again' };
     const f = file();
     if (!f) {
       return [
         { name: 'create', description: 'create a new note and open it' },
         ...state.files.slice(0, 9).map((n, i) => ({ name: String(i + 1), description: `open ${quote(n.name)}` })),
+        reply,
         done,
       ];
     }
@@ -61,6 +64,7 @@ export function createNotesEnv() {
       hasLines && { name: 'bullet', description: 'toggle a bullet point on the current line' },
       { name: 'rename', description: 'rename this note' },
       { name: 'home', description: 'back to the list of notes' },
+      reply,
       done,
     ].filter(Boolean);
   }
@@ -87,12 +91,18 @@ export function createNotesEnv() {
     }
 
     if (writing) {
-      const instruction = {
-        add: f.lines.length ? `text for a new line below line ${f.cursor + 1}` : 'text for the first line',
-        edit: `replacement text for line ${f.cursor + 1} (currently ${quote(f.lines[f.cursor]?.text)})`,
-        rename: `new name for this note (currently ${quote(f.name)})`,
-      }[writing.kind];
-      const initial = writing.kind === 'edit' ? f.lines[f.cursor].text : writing.kind === 'rename' ? f.name : '';
+      let instruction, initial = '';
+      if (writing.kind === 'reply') {
+        instruction = 'what to say out loud to the user (keep it short)';
+      } else if (writing.kind === 'add') {
+        instruction = f.lines.length ? `text for a new line below line ${f.cursor + 1}` : 'text for the first line';
+      } else if (writing.kind === 'edit') {
+        instruction = `replacement text for line ${f.cursor + 1} (currently ${quote(f.lines[f.cursor].text)})`;
+        initial = f.lines[f.cursor].text;
+      } else {
+        instruction = `new name for this note (currently ${quote(f.name)})`;
+        initial = f.name;
+      }
       return { sections, mode: 'write', write: { instruction, initial, maxTokens: MAX_TOKENS[writing.kind] } };
     }
     return { sections, mode: 'choose', options: options() };
@@ -157,6 +167,9 @@ export function createNotesEnv() {
 
     if (!text) {
       result = `[${kind}] cancelled (no text)`;
+    } else if (kind === 'reply') {
+      result = `[reply] said ${quote(text)}`;
+      onReply(text);
     } else if (kind === 'add') {
       // New lines inherit the bullet of the line above, so lists keep going naturally.
       const bullet = f.lines[f.cursor]?.bullet ?? false;

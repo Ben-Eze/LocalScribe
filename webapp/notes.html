@@ -19,6 +19,7 @@
     .agent-option { text-align: left; background: var(--panel); color: var(--fg); border: 1px solid var(--border); padding: 8px 10px; }
     .agent-option b { color: var(--accent); }
     .agent-text pre { background: var(--panel); border-radius: 6px; padding: 8px; font-size: 12px; white-space: pre-wrap; margin: 6px 0 0; }
+    select { font: inherit; font-size: 14px; color: var(--fg); background: var(--bg); padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; }
     .spoken { font-size: 14px; }
     .spoken span { color: var(--muted); }
     table { border-collapse: collapse; font-size: 13px; }
@@ -48,6 +49,7 @@
 
   <section id="notesCard" class="card">
     <div class="card-title">Notes agent <span id="notesState" class="muted"></span></div>
+    <label class="muted">Agent voice <select id="voiceEngine"></select> <span id="speaking"></span></label>
     <div id="notes"></div>
   </section>
 
@@ -65,10 +67,25 @@
     import { renderHuman } from './agent-ui.js';
     import { createNotesEnv, NOTES_OPTION_NAMES } from './notes-env.js';
     import { createListenerEnv, LISTENER_OPTION_NAMES } from './listener-env.js';
+    import { createSpeaker, ENGINES } from './tts.js';
 
     const $ = (id) => document.getElementById(id);
 
-    const notes = createNotesEnv();
+    // ---- Agent voice ----
+    const speaker = createSpeaker({ onSpeakingChange: (on) => { $('speaking').textContent = on ? '🔊 speaking…' : ''; } });
+    for (const [id, label] of Object.entries(ENGINES)) {
+      // Kokoro is only offered once it has been downloaded on page 2.
+      if (id === 'kokoro' && !speaker.settings.kokoroDownloaded) continue;
+      $('voiceEngine').append(new Option(label, id, false, id === speaker.settings.engine));
+    }
+    $('voiceEngine').onchange = () => { speaker.settings.engine = $('voiceEngine').value; };
+    if (speaker.settings.engine === 'kokoro' && speaker.settings.kokoroDownloaded) speaker.loadKokoro();
+    // iOS needs a tap before any audio can play; the first tap anywhere on the page unlocks it.
+    document.addEventListener('pointerdown', () => speaker.unlock(), { once: true });
+
+    const notes = createNotesEnv({
+      onReply: (text) => speaker.speak(text).catch((e) => { $('speaking').textContent = `voice failed: ${e.message}`; }),
+    });
     let listener = createListenerEnv();
     let active = 'listener'; // which agent currently has control
 

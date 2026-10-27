@@ -9,7 +9,8 @@
   <link rel="stylesheet" href="style.css" />
   <style>
     button.muted-on { background: var(--danger); }
-    textarea { background: var(--panel); flex: 1; min-height: 200px; }
+    textarea { background: var(--panel); flex: 1; min-height: 140px; }
+    select { font: inherit; color: var(--fg); background: var(--bg); padding: 8px; border: 1px solid var(--border); border-radius: 8px; flex: 1; }
     /* Sound-wave icon: bar heights are driven by mic volume; hidden entirely while muted. */
     .wave { display: flex; align-items: center; gap: 4px; height: 40px; width: 52px; }
     .wave span { width: 6px; height: 4px; border-radius: 3px; background: var(--accent); transition: height 60ms linear; }
@@ -37,7 +38,24 @@
 
   <textarea id="transcript" placeholder="Transcribed speech appears here…"></textarea>
 
+  <h2>Speech output</h2>
+  <div class="row">
+    <select id="ttsEngine"></select>
+    <select id="ttsVoice"></select>
+  </div>
+  <div id="kokoroSetup" class="hidden">
+    <button id="kokoroDownload" class="secondary">Download Kokoro (~92 MB)</button>
+    <div id="kokoroProgress" class="bar hidden" style="margin-top:8px"><div id="kokoroFill"></div></div>
+  </div>
+  <div class="row">
+    <input id="ttsText" type="text" value="Sure, I've created a new note called shopping." />
+    <button id="ttsSpeak">Speak</button>
+  </div>
+  <div id="ttsStatus" class="muted"></div>
+
   <script type="module">
+    import { createSpeaker, ENGINES, ROBOT_VARIANTS, KOKORO_VOICES } from './tts.js';
+
     const $ = (id) => document.getElementById(id);
     const show = (el, visible) => el.classList.toggle('hidden', !visible);
     const setStatus = (text) => { $('status').textContent = text; };
@@ -134,7 +152,8 @@
     }
 
     function onAudioChunk(samples, rate) {
-      if (muted) return;
+      // Ignore the mic while the phone itself is talking, so the agent doesn't transcribe its own voice.
+      if (muted || ttsSpeaking) return;
       const chunkMs = (samples.length / rate) * 1000;
       const level = rms(samples);
       const isSpeech = level > Math.max(0.01, noiseFloor * 3);
@@ -169,6 +188,8 @@
     // ---- Microphone ----
     async function start() {
       $('start').disabled = true;
+      // Recording and playback in the same session (otherwise iOS may route replies to the earpiece or mute them).
+      if (navigator.audioSession) navigator.audioSession.type = 'play-and-record';
       try {
         stream = await navigator.mediaDevices.getUserMedia({
           audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
@@ -229,6 +250,79 @@
       });
       requestAnimationFrame(animateWave);
     }
+
+    // ---- Speech output ----
+    let ttsSpeaking = false;
+    const speaker = createSpeaker({
+      onSpeakingChange: (on) => {
+        ttsSpeaking = on;
+        if (on) { segment = null; preroll = []; }
+      },
+    });
+
+    for (const [id, label] of Object.entries(ENGINES)) $('ttsEngine').append(new Option(label, id, false, id === speaker.settings.engine));
+
+    function renderTtsOptions() {
+      const engine = speaker.settings.engine;
+      const voices = engine === 'robot' ? Object.fromEntries(ROBOT_VARIANTS.map((v) => [v, `voice: ${v}`]))
+        : engine === 'kokoro' ? KOKORO_VOICES : null;
+      const selected = engine === 'robot' ? speaker.settings.robotVariant : speaker.settings.kokoroVoice;
+      $('ttsVoice').innerHTML = '';
+      show($('ttsVoice'), !!voices);
+      for (const [id, label] of Object.entries(voices ?? {})) $('ttsVoice').append(new Option(label, id, false, id === selected));
+      show($('kokoroSetup'), engine === 'kokoro' && !kokoroLoaded);
+      $('ttsSpeak').disabled = engine === 'kokoro' && !kokoroLoaded;
+    }
+
+    let kokoroLoaded = false;
+    function loadKokoro() {
+      $('kokoroDownload').disabled = true;
+      show($('kokoroProgress'), true);
+      const files = new Map();
+      $('ttsStatus').textContent = 'Loading Kokoro…';
+      speaker.loadKokoro((p) => {
+        files.set(p.file, p);
+        const loaded = [...files.values()].reduce((s, f) => s + (f.loaded ?? 0), 0);
+        const total = [...files.values()].reduce((s, f) => s + (f.total ?? 0), 0);
+        $('kokoroFill').style.width = `${total ? (loaded / total) * 100 : 0}%`;
+        $('ttsStatus').textContent = `Downloading Kokoro… ${(loaded / 1e6).toFixed(0)} / ${(total / 1e6).toFixed(0)} MB`;
+      }).then(() => {
+        kokoroLoaded = true;
+        $('ttsStatus').textContent = 'Kokoro ready.';
+        renderTtsOptions();
+      }).catch((e) => {
+        $('ttsStatus').textContent = `Kokoro failed: ${e.message}`;
+        $('kokoroDownload').disabled = false;
+      });
+    }
+
+    $('ttsEngine').onchange = () => {
+      speaker.settings.engine = $('ttsEngine').value;
+      if (speaker.settings.engine === 'kokoro' && speaker.settings.kokoroDownloaded) loadKokoro();
+      renderTtsOptions();
+    };
+    $('ttsVoice').onchange = () => {
+      if (speaker.settings.engine === 'robot') speaker.settings.robotVariant = $('ttsVoice').value;
+      else speaker.settings.kokoroVoice = $('ttsVoice').value;
+    };
+    $('kokoroDownload').onclick = loadKokoro;
+    $('ttsSpeak').onclick = async () => {
+      speaker.unlock();
+      $('ttsSpeak').disabled = true;
+      $('ttsStatus').textContent = 'Generating…';
+      try {
+        const r = await speaker.speak($('ttsText').value);
+        $('ttsStatus').textContent = r.engine === 'system'
+          ? 'Spoken with the phone voice.'
+          : `Generated ${r.audioSeconds.toFixed(1)}s of speech in ${(r.generateMs / 1000).toFixed(2)}s (${r.engine}).`;
+      } catch (e) {
+        $('ttsStatus').textContent = `Speech failed: ${e?.message ?? e}`;
+      }
+      $('ttsSpeak').disabled = false;
+    };
+
+    if (speaker.settings.engine === 'kokoro' && speaker.settings.kokoroDownloaded) loadKokoro();
+    renderTtsOptions();
 
     $('start').onclick = start;
     $('mute').onclick = () => setMuted(!muted);
