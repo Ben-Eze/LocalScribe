@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="LocalScribe" />
+  <title>LocalScribe Notes</title>
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    .card { border: 1px solid var(--border); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 6px; }
+    .card.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+    .card-title { display: flex; justify-content: space-between; align-items: baseline; font-weight: 600; }
+    .agent-heading { font-size: 12px; font-weight: 600; color: var(--muted); letter-spacing: 0.04em; margin-top: 4px; }
+    .agent-block { background: var(--panel); border-radius: 6px; padding: 6px 8px; font: 14px/1.5 ui-monospace, Menlo, Consolas, monospace; overflow-x: auto; }
+    .agent-line { white-space: pre-wrap; }
+    .agent-line.cursor { background: var(--highlight); border-radius: 4px; }
+    .agent-options { display: flex; flex-direction: column; gap: 6px; }
+    .agent-option { text-align: left; background: var(--panel); color: var(--fg); border: 1px solid var(--border); padding: 8px 10px; }
+    .agent-option b { color: var(--accent); }
+    .agent-text pre { background: var(--panel); border-radius: 6px; padding: 8px; font-size: 12px; white-space: pre-wrap; margin: 6px 0 0; }
+    .spoken { font-size: 14px; }
+    .spoken span { color: var(--muted); }
+    table { border-collapse: collapse; font-size: 13px; }
+    td { padding: 2px 8px 2px 0; }
+  </style>
+</head>
+<body>
+  <nav class="steps">
+    <a href="index.html">1 · Model</a>
+    <a href="voice.html">2 · Voice</a>
+    <a href="notes.html" class="current">3 · Notes</a>
+  </nav>
+  <div class="muted">
+    You play both agents. Type what the user "says": each word is committed (and timestamped) when you press space or Enter.
+  </div>
+
+  <section class="card">
+    <div class="card-title">User speech <span class="muted">typed, can't be undone</span></div>
+    <div id="spoken" class="spoken muted">(nothing said yet)</div>
+    <input id="speech" type="text" placeholder="Type words, space commits each one…" autocomplete="off" autocapitalize="off" />
+  </section>
+
+  <section id="listenerCard" class="card">
+    <div class="card-title">Listener agent <span class="muted">wait or act?</span></div>
+    <div id="listener"></div>
+  </section>
+
+  <section id="notesCard" class="card">
+    <div class="card-title">Notes agent <span id="notesState" class="muted"></span></div>
+    <div id="notes"></div>
+  </section>
+
+  <details class="card">
+    <summary>Option token check (Qwen3 tokenizer)</summary>
+    <div class="muted">Each option name must be exactly one token right after "[", and no two may share a token,
+      so a model's choice can be read from a single next-token probability.</div>
+    <button id="checkTokens" class="secondary">Run check</button>
+    <div id="tokenResult"></div>
+  </details>
+
+  <button id="reset" class="danger">Reset notes, log and transcript</button>
+
+  <script type="module">
+    import { renderHuman } from './agent-ui.js';
+    import { createNotesEnv, NOTES_OPTION_NAMES } from './notes-env.js';
+    import { createListenerEnv, LISTENER_OPTION_NAMES } from './listener-env.js';
+
+    const $ = (id) => document.getElementById(id);
+
+    const notes = createNotesEnv();
+    let listener = createListenerEnv();
+    let active = 'listener'; // which agent currently has control
+
+    // ---- User speech (typed) ----
+    function commitWords(final) {
+      const input = $('speech');
+      const parts = input.value.split(/\s+/);
+      // Without a trailing space the last part is a word still being typed.
+      const keep = final ? '' : parts.pop();
+      for (const w of parts) if (w) listener.addWord(w);
+      input.value = keep;
+      renderSpoken();
+      renderListener();
+    }
+    $('speech').addEventListener('input', () => { if (/\s/.test($('speech').value)) commitWords(false); });
+    $('speech').addEventListener('keydown', (e) => { if (e.key === 'Enter') commitWords(true); });
+
+    function renderSpoken() {
+      const words = listener.words();
+      $('spoken').textContent = words.length ? words.map((w) => w.word).join(' ') : '(nothing said yet)';
+    }
+
+    // ---- Agents ----
+    function renderListener() {
+      renderHuman(listener.observe(), $('listener'), {
+        disabled: active !== 'listener',
+        onOption: (name) => {
+          if (name === 'act') {
+            notes.beginTurn(listener.takeUtterance());
+            active = 'notes';
+          }
+          renderAll();
+        },
+      });
+      $('listenerCard').classList.toggle('active', active === 'listener');
+    }
+
+    function renderNotes() {
+      renderHuman(notes.observe(), $('notes'), {
+        disabled: active !== 'notes',
+        onOption: (name) => {
+          notes.act(name);
+          if (name === 'done') active = 'listener';
+          renderAll();
+        },
+        onWrite: (text) => { notes.write(text); renderAll(); },
+      });
+      $('notesCard').classList.toggle('active', active === 'notes');
+      $('notesState').textContent = active === 'notes' ? 'your turn' : 'idle until the listener acts';
+    }
+
+    function renderAll() { renderListener(); renderNotes(); }
+
+    // The listener's view includes the silence timer, so refresh it twice a second while it is in control.
+    setInterval(() => { if (active === 'listener') renderListener(); }, 500);
+
+    $('reset').onclick = () => {
+      if (!confirm('Delete all notes, the log and the transcript?')) return;
+      notes.reset();
+      listener = createListenerEnv();
+      active = 'listener';
+      renderSpoken();
+      renderAll();
+    };
+
+    // ---- Token check ----
+    $('checkTokens').onclick = async () => {
+      $('checkTokens').disabled = true;
+      $('tokenResult').textContent = 'Loading Qwen3 tokenizer (~9 MB)…';
+      try {
+        const { AutoTokenizer } = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.1');
+        const tokenizer = await AutoTokenizer.from_pretrained('onnx-community/Qwen3-0.6B-ONNX');
+        const encode = (text) => Array.from(tokenizer.encode(text, { add_special_tokens: false }));
+        const prefix = '## ACTION\n[';
+        const prefixIds = encode(prefix);
+
+        const table = document.createElement('table');
+        let allOk = true;
+        for (const [group, names] of [['listener', LISTENER_OPTION_NAMES], ['notes', NOTES_OPTION_NAMES]]) {
+          const seen = new Map();
+          for (const name of names) {
+            const ids = encode(prefix + name);
+            const extra = ids.slice(prefixIds.length);
+            const prefixIntact = prefixIds.every((id, i) => ids[i] === id);
+            let verdict = '✓ one token';
+            if (!prefixIntact) verdict = '✗ merges with "["';
+            else if (extra.length !== 1) verdict = `✗ ${extra.length} tokens: ${extra.map((id) => JSON.stringify(tokenizer.decode([id]))).join(' + ')}`;
+            else if (seen.has(extra[0])) verdict = `✗ same token as [${seen.get(extra[0])}]`;
+            if (extra.length === 1) seen.set(extra[0], name);
+            if (!verdict.startsWith('✓')) allOk = false;
+            const row = table.insertRow();
+            row.insertCell().textContent = group;
+            row.insertCell().textContent = `[${name}]`;
+            row.insertCell().textContent = extra.join(',');
+            row.insertCell().textContent = verdict;
+          }
+        }
+        $('tokenResult').innerHTML = '';
+        $('tokenResult').append(
+          Object.assign(document.createElement('div'), { textContent: allOk ? 'All option names are valid single tokens.' : 'Some option names need renaming.' }),
+          table,
+        );
+      } catch (e) {
+        $('tokenResult').textContent = `Token check failed: ${e?.message ?? e}`;
+      }
+      $('checkTokens').disabled = false;
+    };
+
+    renderSpoken();
+    renderAll();
+  </script>
+</body>
+</html>
