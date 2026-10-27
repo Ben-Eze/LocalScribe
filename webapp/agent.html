@@ -50,6 +50,7 @@
     <summary class="muted">What the agent is doing</summary>
     <div id="trace"></div>
   </details>
+  <div id="diag"></div>
 
   <script type="module">
     import { createSpeechInput, animateWave } from './mic.js?v=__V__';
@@ -58,6 +59,7 @@
     import { createNotesEnv } from './notes-env.js?v=__V__';
     import { createListenerEnv } from './listener-env.js?v=__V__';
     import { startSession, addSpeech, addAgentTurn } from './transcript-store.js?v=__V__';
+    import { log, stage, mountDiagnostics } from './crash-log.js?v=__V__';
 
     const LISTENER_SYSTEM = [
       'You listen to a live transcript of someone talking to their voice notes assistant.',
@@ -98,6 +100,7 @@
       const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
       const box = $('trace');
       box.textContent = `${time}  ${text}\n` + box.textContent.split('\n').slice(0, 150).join('\n');
+      log(text);
     }
 
     // ---- The pieces ----
@@ -268,13 +271,18 @@
       animateWave([...document.querySelectorAll('#wave span')], input);
 
       setStatus('Loading the language model…');
+      stage('agent: loading the language model');
       const startedAt = performance.now();
       try {
         await model.load((f) => setStatus(`Loading the language model… ${pct(f)}`));
       } catch (e) {
+        log(`model load failed: ${e?.message ?? e}`);
+        stage('idle');
         setStatus(`Could not load the language model: ${e?.message ?? e}`);
         return;
       }
+      // Stays non-idle while running, so a crash at any point is flagged on the next start.
+      stage('agent: running');
       trace(`model loaded in ${secs(performance.now() - startedAt)} (${model.usingGpu ? 'GPU' : 'CPU'})`);
       if (speaker.settings.engine === 'robot') speaker.loadRobot().catch(() => {});
 
@@ -297,6 +305,7 @@
 
     $('power').onclick = start;
     renderView();
+    mountDiagnostics($('diag'));
   </script>
 </body>
 </html>

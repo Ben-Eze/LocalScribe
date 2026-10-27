@@ -2,6 +2,7 @@
 import { Wllama } from 'https://cdn.jsdelivr.net/npm/@wllama/wllama@3.8.1/esm/index.js';
 import { AGENT_MODEL, WLLAMA, urlOf } from './models.js?v=__V__';
 import { toText } from './agent-ui.js?v=__V__';
+import { wllamaLogger } from './crash-log.js?v=__V__';
 
 // Qwen3 chat format with thinking switched off (an empty think block).
 const chatPrompt = (system, user, assistantStart = '') =>
@@ -11,7 +12,7 @@ const chatPrompt = (system, user, assistantStart = '') =>
 export const CHOICE_CONTEXT = '</think>\n\n[';
 
 export function createAgentModel() {
-  const wllama = new Wllama({ default: `${WLLAMA}/wasm/wllama.wasm` });
+  const wllama = new Wllama({ default: `${WLLAMA}/wasm/wllama.wasm` }, { logger: wllamaLogger });
 
   const isDownloaded = async () => (await wllama.cacheManager.open(urlOf(AGENT_MODEL)).catch(() => null)) !== null;
 
@@ -25,6 +26,10 @@ export function createAgentModel() {
       // cached prompt prefix instead of evicting the other's (reading the prompt is the slow part).
       n_parallel: 2,
       kv_unified: true,
+      // 8-bit context cache: half the memory of the default (needs flash attention).
+      flash_attn: true,
+      cache_type_k: 'q8_0',
+      cache_type_v: 'q8_0',
       n_gpu_layers: useGpu ? 99 : 0,
       progressCallback: ({ loaded, total }) => onProgress(total ? loaded / total : 0),
     });
