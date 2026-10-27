@@ -6,7 +6,8 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-title" content="LocalScribe" />
   <title>LocalScribe Notes</title>
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="style.css?v=__V__" />
+  <script type="module" src="version-check.js?v=__V__"></script>
   <style>
     .card { border: 1px solid var(--border); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 6px; }
     .card.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
@@ -30,7 +31,9 @@
   <nav class="steps">
     <a href="index.html">1 · Model</a>
     <a href="voice.html">2 · Voice</a>
-    <a href="notes.html" class="current">3 · Notes</a>
+    <a href="notes.html" class="current">3 · Practice</a>
+    <a href="agent.html">4 · Agent</a>
+    <a href="library.html">5 · Notes</a>
   </nav>
   <div class="muted">
     You play both agents. Type what the user "says": each word is committed (and timestamped) when you press space or Enter.
@@ -64,10 +67,10 @@
   <button id="reset" class="danger">Reset notes, log and transcript</button>
 
   <script type="module">
-    import { renderHuman } from './agent-ui.js';
-    import { createNotesEnv, NOTES_OPTION_NAMES } from './notes-env.js';
-    import { createListenerEnv, LISTENER_OPTION_NAMES } from './listener-env.js';
-    import { createSpeaker, ENGINES } from './tts.js';
+    import { renderHuman } from './agent-ui.js?v=__V__';
+    import { createNotesEnv, NOTES_OPTION_NAMES } from './notes-env.js?v=__V__';
+    import { createListenerEnv, LISTENER_OPTION_NAMES } from './listener-env.js?v=__V__';
+    import { createSpeaker, ENGINES } from './tts.js?v=__V__';
 
     const $ = (id) => document.getElementById(id);
 
@@ -159,7 +162,8 @@
         const { AutoTokenizer } = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.1');
         const tokenizer = await AutoTokenizer.from_pretrained('onnx-community/Qwen3-0.6B-ONNX');
         const encode = (text) => Array.from(tokenizer.encode(text, { add_special_tokens: false }));
-        const prefix = '## ACTION\n[';
+        // Tokenize after the same text that precedes an option name in a real agent prompt.
+        const { CHOICE_CONTEXT: prefix } = await import('./llm.js?v=__V__');
         const prefixIds = encode(prefix);
 
         const table = document.createElement('table');

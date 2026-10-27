@@ -10,25 +10,45 @@
 export const NOTES_OPTION_NAMES = ['create', 'up', 'down', 'add', 'edit', 'del', 'bullet', 'rename', 'home', 'reply', 'done', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
 
 const STORAGE_KEY = 'localscribe-notes';
-const LOG_SHOWN = 20;     // entries included in the observation
+const LOG_SHOWN = 12;     // entries included in the observation (kept short: every token costs the model time)
 const LOG_KEPT = 200;     // entries kept in storage
 const MAX_STEPS = 8;      // actions per turn before only [done] is offered
 const MAX_TOKENS = { add: 40, edit: 40, rename: 8, reply: 30 };
 
 const quote = (s) => JSON.stringify(s);
 
+const loadState = () => {
+  try { return { files: [], open: null, log: [], ...JSON.parse(localStorage.getItem(STORAGE_KEY)) }; } catch { return { files: [], open: null, log: [] }; }
+};
+const saveState = (state) => {
+  state.log = state.log.slice(-LOG_KEPT);
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch {}
+};
+
+// For the notes library page: every saved note, most recently changed first.
+export function loadNotes() {
+  return [...loadState().files].sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0));
+}
+
+export function deleteNote(name) {
+  const state = loadState();
+  const index = state.files.findIndex((f) => f.name === name);
+  if (index === -1) return;
+  state.files.splice(index, 1);
+  if (state.open === index) state.open = null;
+  else if (state.open > index) state.open--;
+  saveState(state);
+}
+
 // onReply(text) is called whenever the agent says something out loud; the page decides how to voice it.
 export function createNotesEnv({ onReply = () => {} } = {}) {
-  let state = { files: [], open: null, log: [] };
-  try { Object.assign(state, JSON.parse(localStorage.getItem(STORAGE_KEY)) ?? {}); } catch {}
-  let writing = null; // { kind: 'add' | 'edit' | 'rename' } while waiting for text
+  let state = loadState();
+  let writing = null; // { kind: 'add' | 'edit' | 'rename' | 'reply' } while waiting for text
   let steps = 0;
 
-  const save = () => {
-    state.log = state.log.slice(-LOG_KEPT);
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch {}
-  };
+  const save = () => saveState(state);
   const file = () => (state.open === null ? null : state.files[state.open]);
+  const touch = (f) => { f.updated = Date.now(); };
   const record = (text) => { state.log.push({ kind: 'action', text }); };
   const lineLabel = (line) => (line.bullet ? '• ' : '') + line.text;
 
@@ -127,7 +147,7 @@ export function createNotesEnv({ onReply = () => {} } = {}) {
     } else if (name === 'create') {
       let n = state.files.length + 1;
       while (state.files.some((x) => x.name === `Note ${n}`)) n++;
-      state.files.unshift({ name: `Note ${n}`, lines: [], cursor: 0 });
+      state.files.unshift({ name: `Note ${n}`, lines: [], cursor: 0, updated: Date.now() });
       state.open = 0;
       result = `[create] created and opened ${quote(`Note ${n}`)}`;
     } else if (/^\d$/.test(name)) {
@@ -142,10 +162,12 @@ export function createNotesEnv({ onReply = () => {} } = {}) {
     } else if (name === 'del') {
       const [removed] = f.lines.splice(f.cursor, 1);
       f.cursor = Math.max(0, Math.min(f.cursor, f.lines.length - 1));
+      touch(f);
       result = `[del] deleted line: ${quote(removed.text)}`;
     } else if (name === 'bullet') {
       const line = f.lines[f.cursor];
       line.bullet = !line.bullet;
+      touch(f);
       result = `[bullet] ${line.bullet ? 'added bullet to' : 'removed bullet from'} line ${f.cursor + 1}`;
     } else {
       writing = { kind: name }; // add / edit / rename: the result is recorded once the text arrives
@@ -186,6 +208,7 @@ export function createNotesEnv({ onReply = () => {} } = {}) {
       f.name = text;
       result = `[rename] ${quote(old)} → ${quote(text)}`;
     }
+    if (kind !== 'reply' && text) touch(f);
 
     record(result);
     save();
@@ -199,5 +222,15 @@ export function createNotesEnv({ onReply = () => {} } = {}) {
     save();
   }
 
-  return { observe, act, write, beginTurn, reset };
+  // Plain state for a human-friendly view (page 4): the open note, or the list of notes.
+  function snapshot() {
+    const f = file();
+    return {
+      note: f && { name: f.name, lines: f.lines.map((l) => ({ ...l })), cursor: f.cursor },
+      notes: state.files.map((n) => n.name),
+      writing: writing?.kind ?? null,
+    };
+  }
+
+  return { observe, act, write, beginTurn, reset, snapshot };
 }

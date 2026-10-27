@@ -6,7 +6,8 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-title" content="LocalScribe" />
   <title>LocalScribe</title>
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="style.css?v=__V__" />
+  <script type="module" src="version-check.js?v=__V__"></script>
   <style>
     .model { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; }
     .model label { flex: 1; }
@@ -19,7 +20,9 @@
   <nav class="steps">
     <a href="index.html" class="current">1 · Model</a>
     <a href="voice.html">2 · Voice</a>
-    <a href="notes.html">3 · Notes</a>
+    <a href="notes.html">3 · Practice</a>
+    <a href="agent.html">4 · Agent</a>
+    <a href="library.html">5 · Notes</a>
   </nav>
   <div id="status" class="muted">Starting…</div>
 
@@ -48,14 +51,7 @@
 
   <script type="module">
     import { Wllama } from 'https://cdn.jsdelivr.net/npm/@wllama/wllama@3.8.1/esm/index.js';
-
-    const MODELS = [
-      // Qwen3 "thinks" before answering by default; /no_think turns that off for quick replies.
-      { id: 'qwen06b', label: 'Qwen3 0.6B · Q4_K_M · 397 MB · DEFAULT', repo: 'unsloth/Qwen3-0.6B-GGUF', file: 'Qwen3-0.6B-Q4_K_M.gguf', promptSuffix: ' /no_think' },
-      { id: 'gemma1b', label: 'Gemma 3 1B · Q4_K_M · 806 MB', repo: 'ggml-org/gemma-3-1b-it-GGUF', file: 'gemma-3-1b-it-Q4_K_M.gguf' },
-      { id: 'gemma270m', label: 'Gemma 3 270M · Q8_0 · 292 MB', repo: 'ggml-org/gemma-3-270m-it-GGUF', file: 'gemma-3-270m-it-Q8_0.gguf' },
-    ];
-    const urlOf = (m) => `https://huggingface.co/${m.repo}/resolve/main/${m.file}`;
+    import { MODELS, WLLAMA, urlOf } from './models.js?v=__V__';
 
     const $ = (id) => document.getElementById(id);
     const show = (el, visible) => el.classList.toggle('hidden', !visible);
@@ -66,7 +62,7 @@
       set: (k, v) => { try { localStorage.setItem(k, v); } catch {} },
     };
 
-    const wllama = new Wllama({ default: 'https://cdn.jsdelivr.net/npm/@wllama/wllama@3.8.1/esm/wasm/wllama.wasm' });
+    const wllama = new Wllama({ default: `${WLLAMA}/wasm/wllama.wasm` });
     let current = null;
     let abortController = null;
 

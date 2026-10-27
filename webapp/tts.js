@@ -60,7 +60,7 @@ export function createSpeaker({ onSpeakingChange = () => {} } = {}) {
 
   function loadKokoro(onProgress = () => {}) {
     if (kokoro) return kokoro.ready;
-    const worker = new Worker(new URL('./tts-worker.js', import.meta.url), { type: 'module' });
+    const worker = new Worker(new URL('./tts-worker.js?v=__V__', import.meta.url), { type: 'module' });
     const pending = new Map();
     let nextId = 1;
     const ready = new Promise((resolve, reject) => {

@@ -6,7 +6,8 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-title" content="LocalScribe" />
   <title>LocalScribe Voice</title>
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="style.css?v=__V__" />
+  <script type="module" src="version-check.js?v=__V__"></script>
   <style>
     button.muted-on { background: var(--danger); }
     textarea { background: var(--panel); flex: 1; min-height: 140px; }
@@ -20,7 +21,9 @@
   <nav class="steps">
     <a href="index.html">1 · Model</a>
     <a href="voice.html" class="current">2 · Voice</a>
-    <a href="notes.html">3 · Notes</a>
+    <a href="notes.html">3 · Practice</a>
+    <a href="agent.html">4 · Agent</a>
+    <a href="library.html">5 · Notes</a>
   </nav>
   <div id="status" class="muted">Starting…</div>
 
@@ -54,211 +57,55 @@
   <div id="ttsStatus" class="muted"></div>
 
   <script type="module">
-    import { createSpeaker, ENGINES, ROBOT_VARIANTS, KOKORO_VOICES } from './tts.js';
+    import { createSpeaker, ENGINES, ROBOT_VARIANTS, KOKORO_VOICES } from './tts.js?v=__V__';
+    import { createSpeechInput, animateWave } from './mic.js?v=__V__';
 
     const $ = (id) => document.getElementById(id);
     const show = (el, visible) => el.classList.toggle('hidden', !visible);
     const setStatus = (text) => { $('status').textContent = text; };
+    let listening = false;
 
-    const TARGET_RATE = 16000;        // Whisper expects 16 kHz mono
-    const SILENCE_TO_END_MS = 800;    // a pause this long ends a sentence
-    const MIN_SPEECH_MS = 300;        // ignore clicks and bumps
-    const MAX_SEGMENT_MS = 20000;     // force a cut during long monologues
-    const PREROLL_MS = 300;           // keep a little audio from before speech was detected
-
-    const worker = new Worker('voice-worker.js', { type: 'module' });
-    let ready = false;
-    let muted = false;
-    let stream = null;
-    let audioCtx = null;
-    let analyser = null;
-
-    // ---- Whisper model loading ----
-    const fileProgress = new Map();
-    worker.onmessage = ({ data }) => {
-      if (data.type === 'progress') {
-        fileProgress.set(data.file, data);
-        const loaded = [...fileProgress.values()].reduce((s, p) => s + (p.loaded ?? 0), 0);
-        const total = [...fileProgress.values()].reduce((s, p) => s + (p.total ?? 0), 0);
+    // ---- Speech input ----
+    const input = createSpeechInput({
+      onProgress: (fraction, loaded, total) => {
         show($('progress'), true);
-        $('progressFill').style.width = `${total ? (loaded / total) * 100 : 0}%`;
+        $('progressFill').style.width = `${fraction * 100}%`;
         setStatus(`Downloading Whisper tiny.en… ${(loaded / 1e6).toFixed(0)} / ${(total / 1e6).toFixed(0)} MB`);
-      } else if (data.type === 'ready') {
-        ready = true;
+      },
+      onReady: () => {
         show($('progress'), false);
-        setStatus(stream ? 'Listening.' : 'Whisper ready. Tap Start listening.');
-        processQueue();
-      } else if (data.type === 'result') {
-        busy = false;
-        const text = cleanTranscript(data.text);
-        if (text) {
-          const box = $('transcript');
-          box.value += (box.value && !box.value.endsWith('\n') ? ' ' : '') + text;
-          box.scrollTop = box.scrollHeight;
-        }
-        setStatus(`Transcribed ${data.seconds.toFixed(1)}s of audio in ${(data.ms / 1000).toFixed(1)}s.${muted ? ' Muted.' : ' Listening.'}`);
-        processQueue();
-      } else if (data.type === 'error') {
-        busy = false;
-        setStatus(`Whisper error: ${data.message}`);
-      }
-    };
-    worker.postMessage({ type: 'load' });
-
-    // Whisper invents text like "[BLANK_AUDIO]" or "(wind blowing)" for non-speech; drop those.
-    function cleanTranscript(text) {
-      return text.replace(/\[[^\]]*\]|\([^)]*\)/g, '').replace(/\s+/g, ' ').trim();
-    }
-
-    // ---- Transcription queue: one segment at a time ----
-    const queue = [];
-    let busy = false;
-    function processQueue() {
-      if (!ready || busy || queue.length === 0) return;
-      busy = true;
-      setStatus('Transcribing…');
-      const audio = queue.shift();
-      worker.postMessage({ type: 'transcribe', audio }, [audio.buffer]);
-    }
-
-    function resampleTo16k(chunks, fromRate) {
-      const length = chunks.reduce((n, c) => n + c.length, 0);
-      const input = new Float32Array(length);
-      let offset = 0;
-      for (const c of chunks) { input.set(c, offset); offset += c.length; }
-
-      const ratio = fromRate / TARGET_RATE;
-      const output = new Float32Array(Math.floor(length / ratio));
-      for (let i = 0; i < output.length; i++) {
-        const pos = i * ratio;
-        const i0 = Math.floor(pos);
-        const i1 = Math.min(i0 + 1, length - 1);
-        output[i] = input[i0] + (input[i1] - input[i0]) * (pos - i0);
-      }
-      return output;
-    }
-
-    // ---- Voice activity detection: energy above an adaptive noise floor ----
-    let noiseFloor = 0.005;
-    let segment = null;          // chunks of the sentence currently being spoken
-    let preroll = [];            // recent chunks kept in case speech starts
-    let speechMs = 0;
-    let silenceMs = 0;
-
-    function rms(samples) {
-      let sum = 0;
-      for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
-      return Math.sqrt(sum / samples.length);
-    }
-
-    function onAudioChunk(samples, rate) {
-      // Ignore the mic while the phone itself is talking, so the agent doesn't transcribe its own voice.
-      if (muted || ttsSpeaking) return;
-      const chunkMs = (samples.length / rate) * 1000;
-      const level = rms(samples);
-      const isSpeech = level > Math.max(0.01, noiseFloor * 3);
-      // Track background noise only when nobody is talking, so the threshold adapts to the room.
-      if (!isSpeech) noiseFloor = noiseFloor * 0.95 + level * 0.05;
-
-      if (!segment) {
-        preroll.push(samples);
-        while (preroll.length * chunkMs > PREROLL_MS) preroll.shift();
-        if (isSpeech) {
-          segment = [...preroll];
-          preroll = [];
-          speechMs = chunkMs;
-          silenceMs = 0;
-        }
-        return;
-      }
-
-      segment.push(samples);
-      if (isSpeech) { speechMs += chunkMs; silenceMs = 0; } else { silenceMs += chunkMs; }
-      const segmentMs = segment.length * chunkMs;
-
-      if (silenceMs >= SILENCE_TO_END_MS || segmentMs >= MAX_SEGMENT_MS) {
-        if (speechMs >= MIN_SPEECH_MS) {
-          queue.push(resampleTo16k(segment, rate));
-          processQueue();
-        }
-        segment = null;
-      }
-    }
-
-    // ---- Microphone ----
-    async function start() {
-      $('start').disabled = true;
-      // Recording and playback in the same session (otherwise iOS may route replies to the earpiece or mute them).
-      if (navigator.audioSession) navigator.audioSession.type = 'play-and-record';
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-        });
-      } catch (e) {
-        setStatus(`Microphone unavailable: ${e?.message ?? e}`);
-        $('start').disabled = false;
-        return;
-      }
-
-      audioCtx = new AudioContext();
-      const source = audioCtx.createMediaStreamSource(stream);
-      analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 1024;
-      source.connect(analyser);
-
-      // ScriptProcessorNode is deprecated but is the simplest capture path that works in every Safari version.
-      const processor = audioCtx.createScriptProcessor(4096, 1, 1);
-      processor.onaudioprocess = (e) => onAudioChunk(new Float32Array(e.inputBuffer.getChannelData(0)), audioCtx.sampleRate);
-      source.connect(processor);
-      processor.connect(audioCtx.destination); // outputs silence; needed for the node to run
-
-      show($('start'), false);
-      show($('controls'), true);
-      setStatus(ready ? 'Listening.' : 'Microphone on. Waiting for Whisper to finish loading…');
-      animateWave();
-    }
-
-    // iOS suspends audio when the app is backgrounded; pick it back up on return.
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible' && audioCtx && audioCtx.state !== 'running') audioCtx.resume();
+        setStatus(listening ? 'Listening.' : 'Whisper ready. Tap Start listening.');
+      },
+      onText: ({ text, seconds, transcribeMs }) => {
+        const box = $('transcript');
+        box.value += (box.value && !box.value.endsWith('\n') ? ' ' : '') + text;
+        box.scrollTop = box.scrollHeight;
+        setStatus(`Transcribed ${seconds.toFixed(1)}s of audio in ${(transcribeMs / 1000).toFixed(1)}s.${input.muted ? ' Muted.' : ' Listening.'}`);
+      },
+      onStatus: setStatus,
     });
 
-    function setMuted(value) {
-      muted = value;
-      stream?.getAudioTracks().forEach((t) => { t.enabled = !muted; });
-      segment = null;
-      preroll = [];
-      $('mute').textContent = muted ? 'Unmute' : 'Mute';
-      $('mute').classList.toggle('muted-on', muted);
-      $('wave').style.visibility = muted ? 'hidden' : 'visible';
-      if (!busy) setStatus(muted ? 'Muted.' : 'Listening.');
+    async function start() {
+      $('start').disabled = true;
+      if (!(await input.start())) { $('start').disabled = false; return; }
+      listening = true;
+      show($('start'), false);
+      show($('controls'), true);
+      setStatus(input.ready ? 'Listening.' : 'Microphone on. Waiting for Whisper to finish loading…');
+      animateWave([...document.querySelectorAll('#wave span')], input);
     }
 
-    // ---- Sound-wave icon ----
-    const bars = [...document.querySelectorAll('#wave span')];
-    const BAR_SHAPE = [0.5, 0.8, 1, 0.8, 0.5]; // middle bars taller
-    let smoothed = 0;
-    function animateWave() {
-      const samples = new Float32Array(analyser.fftSize);
-      analyser.getFloatTimeDomainData(samples);
-      // Map loudness to 0..1 on a rough log scale so quiet speech still visibly moves the bars.
-      const level = muted ? 0 : Math.min(1, Math.max(0, (20 * Math.log10(rms(samples) + 1e-6) + 55) / 40));
-      smoothed = smoothed * 0.6 + level * 0.4;
-      bars.forEach((bar, i) => {
-        const jitter = 0.85 + Math.random() * 0.3;
-        bar.style.height = `${4 + smoothed * 36 * BAR_SHAPE[i] * jitter}px`;
-      });
-      requestAnimationFrame(animateWave);
+    function setMuted(value) {
+      input.setMuted(value);
+      $('mute').textContent = value ? 'Unmute' : 'Mute';
+      $('mute').classList.toggle('muted-on', value);
+      $('wave').style.visibility = value ? 'hidden' : 'visible';
+      setStatus(value ? 'Muted.' : 'Listening.');
     }
 
     // ---- Speech output ----
-    let ttsSpeaking = false;
-    const speaker = createSpeaker({
-      onSpeakingChange: (on) => {
-        ttsSpeaking = on;
-        if (on) { segment = null; preroll = []; }
-      },
-    });
+    // The mic ignores audio while the phone is talking, so it doesn't transcribe its own voice.
+    const speaker = createSpeaker({ onSpeakingChange: (on) => input.setSuppressed(on) });
 
     for (const [id, label] of Object.entries(ENGINES)) $('ttsEngine').append(new Option(label, id, false, id === speaker.settings.engine));
 
@@ -325,7 +172,7 @@
     renderTtsOptions();
 
     $('start').onclick = start;
-    $('mute').onclick = () => setMuted(!muted);
+    $('mute').onclick = () => setMuted(!input.muted);
     $('clear').onclick = () => { $('transcript').value = ''; };
   </script>
 </body>

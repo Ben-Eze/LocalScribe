@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="LocalScribe" />
+  <title>LocalScribe Notes</title>
+  <link rel="stylesheet" href="style.css?v=__V__" />
+  <script type="module" src="version-check.js?v=__V__"></script>
+  <style>
+    .note { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; }
+    .note h2 { margin: 0; font-size: 18px; }
+    .note ul { list-style: none; margin: 0; padding: 0; }
+    .note li { padding: 2px 0; }
+    .note li.bullet::before { content: '• '; }
+    .note .row button { padding: 6px 12px; font-size: 14px; }
+    .entry { font-size: 15px; }
+    .entry time { color: var(--muted); font-size: 12px; margin-right: 6px; font-variant-numeric: tabular-nums; }
+    .entry.echo { color: var(--muted); font-style: italic; }
+    .entry.agent { color: var(--muted); font-size: 13px; padding-left: 14px; }
+  </style>
+</head>
+<body>
+  <nav class="steps">
+    <a href="index.html">1 · Model</a>
+    <a href="voice.html">2 · Voice</a>
+    <a href="notes.html">3 · Practice</a>
+    <a href="agent.html">4 · Agent</a>
+    <a href="library.html" class="current">5 · Notes</a>
+  </nav>
+  <h2>Notes</h2>
+  <div id="summary" class="muted"></div>
+  <div id="list" style="display:flex;flex-direction:column;gap:12px"></div>
+
+  <h2>Transcripts</h2>
+  <div id="transcriptSummary" class="muted"></div>
+  <div id="sessions" style="display:flex;flex-direction:column;gap:12px"></div>
+
+  <script type="module">
+    import { loadNotes, deleteNote } from './notes-env.js?v=__V__';
+    import { loadSessions, deleteSession, sessionText } from './transcript-store.js?v=__V__';
+
+    const asText = (note) => [note.name, ...note.lines.map((l) => (l.bullet ? '• ' : '') + l.text)].join('\n');
+    const clock = (ms) => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+    function copyButton(getText) {
+      const button = Object.assign(document.createElement('button'), { className: 'secondary', textContent: 'Copy' });
+      button.onclick = async () => {
+        try { await navigator.clipboard.writeText(getText()); button.textContent = 'Copied'; } catch { button.textContent = 'Copy failed'; }
+        setTimeout(() => { button.textContent = 'Copy'; }, 1500);
+      };
+      return button;
+    }
+
+    function renderTranscripts() {
+      const sessions = loadSessions();
+      document.getElementById('transcriptSummary').textContent = sessions.length
+        ? 'Everything heard on page 4, saved as it was transcribed. Grey italic lines look like the agent hearing itself.'
+        : 'No transcripts yet. Everything you say on page 4 is saved here.';
+      const list = document.getElementById('sessions');
+      list.innerHTML = '';
+      for (const session of sessions) {
+        const card = document.createElement('section');
+        card.className = 'note';
+        const title = document.createElement('h2');
+        title.textContent = new Date(session.startedAt).toLocaleString();
+        const said = session.entries.filter((e) => e.kind === 'speech' && !e.echo).length;
+        const meta = Object.assign(document.createElement('div'), { className: 'muted', textContent: `${said} things said` });
+        const body = document.createElement('div');
+        for (const e of session.entries) {
+          const row = document.createElement('div');
+          const time = document.createElement('time');
+          if (e.kind === 'speech') {
+            row.className = e.echo ? 'entry echo' : 'entry';
+            time.textContent = clock(e.startAt);
+            row.append(time, e.text);
+          } else {
+            row.className = 'entry agent';
+            row.textContent = `↳ ${e.actions.join(' → ') || '(no actions)'}`;
+          }
+          body.append(row);
+        }
+        if (!session.entries.length) body.innerHTML = '<div class="muted">(nothing heard)</div>';
+        const actions = document.createElement('div');
+        actions.className = 'row';
+        const del = Object.assign(document.createElement('button'), { className: 'danger', textContent: 'Delete' });
+        del.onclick = () => { if (confirm('Delete this transcript?')) { deleteSession(session.id); renderTranscripts(); } };
+        actions.append(copyButton(() => sessionText(session)), del);
+        card.append(title, meta, body, actions);
+        list.append(card);
+      }
+    }
+
+    function render() {
+      const notes = loadNotes();
+      document.getElementById('summary').textContent = notes.length
+        ? `${notes.length} note${notes.length === 1 ? '' : 's'}, most recently changed first. Saved on this device.`
+        : 'No notes yet. Notes made on pages 3 and 4 appear here automatically.';
+      const list = document.getElementById('list');
+      list.innerHTML = '';
+      for (const note of notes) {
+        const card = document.createElement('section');
+        card.className = 'note';
+        const title = document.createElement('h2');
+        title.textContent = note.name;
+        const when = document.createElement('div');
+        when.className = 'muted';
+        when.textContent = note.updated ? `Changed ${new Date(note.updated).toLocaleString()}` : '';
+        const lines = document.createElement('ul');
+        for (const line of note.lines) {
+          const li = document.createElement('li');
+          li.textContent = line.text;
+          li.classList.toggle('bullet', line.bullet);
+          lines.append(li);
+        }
+        if (!note.lines.length) lines.innerHTML = '<li class="muted">(empty)</li>';
+
+        const actions = document.createElement('div');
+        actions.className = 'row';
+        const copy = copyButton(() => asText(note));
+        const del = Object.assign(document.createElement('button'), { className: 'danger', textContent: 'Delete' });
+        del.onclick = () => { if (confirm(`Delete "${note.name}"?`)) { deleteNote(note.name); render(); } };
+        actions.append(copy, del);
+
+        card.append(title, when, lines, actions);
+        list.append(card);
+      }
+    }
+
+    render();
+    renderTranscripts();
+    // Notes and transcripts may change on page 4 while this page sits in the background.
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') { render(); renderTranscripts(); }
+    });
+  </script>
+</body>
+</html>

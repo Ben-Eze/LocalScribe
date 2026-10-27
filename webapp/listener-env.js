@@ -10,9 +10,14 @@ export function createListenerEnv() {
 
   const seconds = (ms) => `${(ms / 1000).toFixed(1)}s`;
 
-  function addWord(word) {
-    words.push({ word, t: Date.now() - startedAt });
+  // `at` is when the word was spoken (Date.now() ms); defaults to now for typed words.
+  function addWord(word, at = Date.now()) {
+    words.push({ word, t: at - startedAt });
   }
+
+  const pendingCount = () => words.length - pendingFrom;
+  const pendingText = () => words.slice(pendingFrom).map((w) => w.word).join(' ');
+  const silenceMs = () => (words.length ? Date.now() - startedAt - words[words.length - 1].t : Infinity);
 
   function observe() {
     const pending = words.slice(pendingFrom);
@@ -41,5 +46,5 @@ export function createListenerEnv() {
     return utterance;
   }
 
-  return { addWord, observe, takeUtterance, words: () => words };
+  return { addWord, observe, takeUtterance, pendingCount, pendingText, silenceMs, words: () => words };
 }

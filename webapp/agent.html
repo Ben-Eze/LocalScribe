@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="LocalScribe" />
+  <title>LocalScribe Agent</title>
+  <link rel="stylesheet" href="style.css?v=__V__" />
+  <script type="module" src="version-check.js?v=__V__"></script>
+  <style>
+    .top { display: flex; align-items: center; gap: 16px; }
+    #power { flex: 1; padding: 18px; font-size: 20px; font-weight: 600; border-radius: 14px; }
+    #power.muted-on { background: var(--danger); }
+    .wave { display: flex; align-items: center; gap: 4px; height: 44px; width: 52px; }
+    .wave span { width: 6px; height: 4px; border-radius: 3px; background: var(--accent); transition: height 60ms linear; }
+    #heard { min-height: 1.4em; font-size: 15px; color: var(--muted); font-style: italic; }
+    .view { flex: 1; border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+    .view h2 { margin: 0 0 8px; font-size: 20px; }
+    .view ul { list-style: none; margin: 0; padding: 0; }
+    .view li { padding: 4px 6px; border-radius: 6px; font-size: 17px; }
+    .view li.cursor { background: var(--highlight); }
+    .view li.bullet::before { content: '• '; }
+    .view .empty { color: var(--muted); }
+    #said { font-size: 15px; }
+    #said:not(:empty)::before { content: '🔊 '; }
+    #trace { font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; max-height: 320px; overflow-y: auto; }
+  </style>
+</head>
+<body>
+  <nav class="steps">
+    <a href="index.html">1 · Model</a>
+    <a href="voice.html">2 · Voice</a>
+    <a href="notes.html">3 · Practice</a>
+    <a href="agent.html" class="current">4 · Agent</a>
+    <a href="library.html">5 · Notes</a>
+  </nav>
+
+  <div class="top">
+    <button id="power">Start</button>
+    <div id="wave" class="wave hidden"><span></span><span></span><span></span><span></span><span></span></div>
+  </div>
+  <div id="status" class="muted">Tap Start. Keep this screen open while you talk.</div>
+  <div id="heard"></div>
+
+  <section id="view" class="view"></section>
+  <div id="said"></div>
+
+  <details>
+    <summary class="muted">What the agent is doing</summary>
+    <div id="trace"></div>
+  </details>
+
+  <script type="module">
+    import { createSpeechInput, animateWave } from './mic.js?v=__V__';
+    import { createSpeaker } from './tts.js?v=__V__';
+    import { createAgentModel } from './llm.js?v=__V__';
+    import { createNotesEnv } from './notes-env.js?v=__V__';
+    import { createListenerEnv } from './listener-env.js?v=__V__';
+    import { startSession, addSpeech, addAgentTurn } from './transcript-store.js?v=__V__';
+
+    const LISTENER_SYSTEM = [
+      'You listen to a live transcript of someone talking to their voice notes assistant.',
+      'Decide whether they have finished saying a request that the assistant should carry out now.',
+      'Choose [wait] if they are mid-sentence (for example the last word is "and", "to", "the" or "with") or have not asked for anything.',
+      'Choose [act] if a complete request has been said.',
+    ].join('\n');
+
+    const NOTES_SYSTEM = [
+      'You are a voice notes assistant. The user cannot see a screen: they speak, and they hear what you [reply].',
+      'You control a simple notes app one step at a time. Each step shows the LOG (what the user said and what you did),',
+      'your LOCATION, the NOTE (">" marks the cursor line) and the OPTIONS. Choose exactly one option.',
+      'Rules:',
+      "- Carry out the user's latest request step by step, then [reply] with a short confirmation, then [done].",
+      '- To write in a note: open or create it, choose [add], then write one line. Each list item goes on its own line.',
+      '- To change or delete a line, first move the cursor to it with [up] or [down].',
+      '- Never repeat an action the LOG shows is already done.',
+      '- If the user did not ask for anything, choose [done].',
+      'Example: user: "start a shopping list with eggs and milk" → [create] → [rename] "Shopping" → [add] "eggs" → [add] "milk"',
+      '→ [reply] "Started a shopping list with eggs and milk." → [done]',
+    ].join('\n');
+
+    // When to hand the transcript to the notes agent: the listener model's confidence that a request is
+    // complete, plus a term that grows with silence (long pauses usually mean the user has finished).
+    const MIN_SILENCE_MS = 700;        // never act while the user is barely pausing
+    const SILENCE_WEIGHT = 2.5;        // log-odds per second of silence
+    const SILENCE_PIVOT_S = 1.5;       // silence at which timing is neutral
+    const RECHECK_AT_S = [1, 2, 3, 5, 8];
+    const MAX_TURN_STEPS = 12;
+
+    const $ = (id) => document.getElementById(id);
+    const show = (el, visible) => el.classList.toggle('hidden', !visible);
+    const setStatus = (text) => { $('status').textContent = text; };
+    const pct = (p) => `${Math.round(p * 100)}%`;
+    const secs = (ms) => `${(ms / 1000).toFixed(1)}s`;
+
+    function trace(text) {
+      const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      const box = $('trace');
+      box.textContent = `${time}  ${text}\n` + box.textContent.split('\n').slice(0, 150).join('\n');
+    }
+
+    // ---- The pieces ----
+    let running = false;
+    let busy = false;
+    let lastEval = { words: 0, silence: 0 };
+    let sessionId = null;
+
+    // The mic stays on while the agent talks, so nothing the user says is lost. Echoes of the agent's own
+    // voice (if echo cancellation misses them) are recognised by matching against what it just said.
+    const replies = []; // { words, start, end }
+    const wordsOf = (text) => text.toLowerCase().replace(/[^a-z0-9' ]/g, ' ').split(/\s+/).filter(Boolean);
+    function isEcho(text, startAt, endAt) {
+      const heard = wordsOf(text);
+      return heard.length > 0 && replies.some((r) => {
+        if (startAt > r.end + 1500 || endAt < r.start - 500) return false;
+        return heard.filter((w) => r.words.has(w)).length / heard.length >= 0.6;
+      });
+    }
+
+    const listener = createListenerEnv();
+    const speaker = createSpeaker({ onSpeakingChange: (on) => { if (on) setStatus('Speaking…'); } });
+    const notes = createNotesEnv({
+      onReply: (text) => {
+        $('said').textContent = text;
+        const reply = { words: new Set(wordsOf(text)), start: Date.now(), end: Infinity };
+        replies.push(reply);
+        if (replies.length > 10) replies.shift();
+        speaker.speak(text)
+          .catch((e) => trace(`voice failed: ${e.message}`))
+          .finally(() => { reply.end = Date.now(); });
+      },
+    });
+    const model = createAgentModel();
+    const input = createSpeechInput({
+      onText: ({ text, startAt, endAt }) => {
+        // Saved first, before the agent does anything with it.
+        const echo = isEcho(text, startAt, endAt);
+        if (sessionId && !addSpeech(sessionId, { text, startAt, endAt, echo })) {
+          setStatus('⚠ Could not save the transcript (storage full?). Check page 5.');
+        }
+        if (echo) { trace(`heard own reply, ignored: "${text}"`); return; }
+        // Whisper gives one timestamp range per segment; spread its words evenly across it.
+        const words = text.split(/\s+/).filter(Boolean);
+        words.forEach((w, i) => listener.addWord(w, startAt + ((endAt - startAt) * (i + 1)) / words.length));
+        trace(`heard "${text}"`);
+        renderHeard();
+      },
+      onStatus: (s) => { if (s !== 'Transcribing…') trace(s); },
+      onProgress: (f) => { if (!running) setStatus(`Loading speech recognition… ${pct(f)}`); },
+    });
+
+    // ---- View ----
+    function renderHeard() { $('heard').textContent = listener.pendingText(); }
+
+    function renderView() {
+      const { note, notes: names } = notes.snapshot();
+      const view = $('view');
+      view.innerHTML = '';
+      const h2 = document.createElement('h2');
+      const list = document.createElement('ul');
+      if (note) {
+        h2.textContent = note.name;
+        note.lines.forEach((line, i) => {
+          const li = document.createElement('li');
+          li.textContent = line.text;
+          li.classList.toggle('bullet', line.bullet);
+          li.classList.toggle('cursor', i === note.cursor);
+          list.append(li);
+        });
+        if (!note.lines.length) list.innerHTML = '<li class="empty">(empty note)</li>';
+      } else {
+        h2.textContent = 'Notes';
+        names.forEach((n) => { const li = document.createElement('li'); li.textContent = n; list.append(li); });
+        if (!names.length) list.innerHTML = '<li class="empty">No notes yet. Try: "make a shopping list with eggs and milk".</li>';
+      }
+      view.append(h2, list);
+    }
+
+    // ---- Listener: decide when the user has finished a request ----
+    function tick() {
+      if (!running || busy || input.hearing) return;
+      const words = listener.pendingCount();
+      if (!words) return;
+      const silence = listener.silenceMs() / 1000;
+      if (silence * 1000 < MIN_SILENCE_MS) return;
+      const newWords = words !== lastEval.words;
+      const crossedCheckpoint = RECHECK_AT_S.some((c) => silence >= c && lastEval.silence < c);
+      if (newWords || crossedCheckpoint) evaluateListener(silence, words);
+    }
+
+    async function evaluateListener(silence, words) {
+      busy = true;
+      lastEval = { words, silence };
+      try {
+        setStatus('Listening… (deciding)');
+        const r = await model.choose(LISTENER_SYSTEM, listener.observe());
+        const semantic = Math.log((r.probs.act + 1e-6) / (r.probs.wait + 1e-6));
+        const score = semantic + SILENCE_WEIGHT * (silence - SILENCE_PIVOT_S);
+        const decision = score > 0 ? 'act' : 'wait';
+        trace(`listener: act ${pct(r.probs.act)} · silence ${silence.toFixed(1)}s → ${decision} (${secs(r.ms)}, ${r.promptTokens} new tokens)`);
+        if (decision === 'act') {
+          lastEval = { words: 0, silence: 0 };
+          await runNotesTurn(listener.takeUtterance());
+        }
+      } catch (e) {
+        trace(`listener error: ${e?.message ?? e}`);
+      } finally {
+        busy = false;
+        setStatus(input.muted ? 'Muted.' : 'Listening.');
+      }
+    }
+
+    // ---- Notes agent: act on one request until it chooses [done] ----
+    async function runNotesTurn(utterance) {
+      renderHeard();
+      notes.beginTurn(utterance);
+      trace(`request: "${utterance}"`);
+      const actions = [];
+      try {
+        for (let step = 0; step < MAX_TURN_STEPS; step++) {
+          const obs = notes.observe();
+          if (obs.mode === 'write') {
+            setStatus('Writing…');
+            const r = await model.write(NOTES_SYSTEM, obs);
+            trace(`  wrote "${r.text}" (${secs(r.ms)})`);
+            actions.push(notes.write(r.text));
+          } else {
+            setStatus('Thinking…');
+            const r = await model.choose(NOTES_SYSTEM, obs);
+            const runnerUp = Object.entries(r.probs).filter(([n]) => n !== r.name).sort((a, b) => b[1] - a[1])[0];
+            trace(`  [${r.name}] ${pct(r.probs[r.name])}${runnerUp ? ` (next: [${runnerUp[0]}] ${pct(runnerUp[1])})` : ''} (${secs(r.ms)}, ${r.promptTokens} new tokens)`);
+            const result = notes.act(r.name);
+            if (!result.endsWith('writing…')) actions.push(result);
+            if (r.name === 'done') break;
+          }
+          renderView();
+        }
+      } finally {
+        // Recorded even if the turn failed part-way, so a later review knows what was and wasn't done.
+        addAgentTurn(sessionId, { at: Date.now(), request: utterance, actions });
+        renderView();
+      }
+    }
+
+    // ---- Start / mute ----
+    let wakeLock = null;
+    async function keepScreenOn() {
+      try { wakeLock = await navigator.wakeLock?.request('screen'); } catch {}
+    }
+    document.addEventListener('visibilitychange', () => {
+      if (running && document.visibilityState === 'visible') keepScreenOn();
+    });
+
+    async function start() {
+      $('power').disabled = true;
+      speaker.unlock();
+      if (!(await model.isDownloaded())) {
+        setStatus('The language model is not on this device yet. Download Qwen3 0.6B on page 1 first.');
+        $('power').disabled = false;
+        return;
+      }
+      if (!(await input.start())) { $('power').disabled = false; return; }
+      sessionId = startSession();
+      if (!sessionId) setStatus('⚠ Could not start saving the transcript (storage full?).');
+      keepScreenOn();
+      show($('wave'), true);
+      animateWave([...document.querySelectorAll('#wave span')], input);
+
+      setStatus('Loading the language model…');
+      const startedAt = performance.now();
+      try {
+        await model.load((f) => setStatus(`Loading the language model… ${pct(f)}`));
+      } catch (e) {
+        setStatus(`Could not load the language model: ${e?.message ?? e}`);
+        return;
+      }
+      trace(`model loaded in ${secs(performance.now() - startedAt)} (${model.usingGpu ? 'GPU' : 'CPU'})`);
+      if (speaker.settings.engine === 'robot') speaker.loadRobot().catch(() => {});
+
+      running = true;
+      $('power').disabled = false;
+      $('power').textContent = 'Mute';
+      $('power').onclick = toggleMute;
+      setStatus(input.ready ? 'Listening.' : 'Listening… (speech recognition still loading)');
+      setInterval(tick, 250);
+    }
+
+    function toggleMute() {
+      const muted = !input.muted;
+      input.setMuted(muted);
+      $('power').textContent = muted ? 'Unmute' : 'Mute';
+      $('power').classList.toggle('muted-on', muted);
+      $('wave').style.visibility = muted ? 'hidden' : 'visible';
+      if (!busy) setStatus(muted ? 'Muted.' : 'Listening.');
+    }
+
+    $('power').onclick = start;
+    renderView();
+  </script>
+</body>
+</html>

@@ -24,6 +24,12 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      # Cache-busting: every file reference carries ?v=__V__; stamp it with this commit so phones fetch the new files.
+      - name: Stamp build version
+        run: |
+          V="${GITHUB_SHA::8}"
+          echo "$V" > webapp/version.txt
+          sed -i "s/__V__/$V/g" webapp/*.html webapp/*.js
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

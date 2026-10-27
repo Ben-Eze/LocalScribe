@@ -31,9 +31,9 @@ textarea { min-height: 64px; resize: vertical; }
 .bar > div { height: 100%; width: 0; background: var(--accent); }
 
 /* Step navigation shared by all pages */
-nav.steps { display: flex; gap: 6px; }
+nav.steps { display: flex; gap: 4px; }
 nav.steps a {
-  flex: 1; text-align: center; padding: 8px 4px; border-radius: 8px; font-size: 14px;
+  flex: 1; text-align: center; padding: 8px 2px; border-radius: 8px; font-size: 12px; white-space: nowrap;
   color: var(--accent); text-decoration: none; border: 1px solid var(--border);
 }
 nav.steps a.current { background: var(--accent); color: #fff; border-color: var(--accent); }
